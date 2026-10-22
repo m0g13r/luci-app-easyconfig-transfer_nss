@@ -9,7 +9,7 @@
 // From eko.one.pl forum
 //
 
-import { readfile, writefile } from "fs";
+import { readfile, writefile, rename } from "fs";
 
 let filename = `/tmp/easyconfig_statistics.json`;
 
@@ -43,11 +43,21 @@ let day    = sprintf("%04d%02d%02d", ts.year, ts.mon, ts.mday);
 let hour   = sprintf("%02d", ts.hour);
 let ts_now = sprintf("%04d%02d%02d%02d%02d", ts.year, ts.mon, ts.mday, ts.hour, ts.min);
 
+// json() returns null on invalid input instead of always throwing,
+// so check the type explicitly and fall back to an empty db.
 let db = {};
 let content = readfile(filename);
 if (content) {
-	try { db = json(content); }
-	catch { db = {}; }
+	let parsed = null;
+	try { parsed = json(content); } catch { parsed = null; }
+	if (type(parsed) == "object")
+		db = parsed;
+}
+
+// atomic write: write temp file, then rename over the original
+function save_db() {
+	writefile(filename + ".tmp", db);
+	rename(filename + ".tmp", filename);
 }
 
 let tmp = null;
@@ -63,7 +73,7 @@ if (IFNAME == "init") {
 			}
 		}
 	}
-	writefile(filename, db);
+	save_db();
 	exit(0)
 }
 
@@ -71,7 +81,7 @@ if (IFNAME == "delete") {
 	tmp = db[MAC];
 	if (tmp) {
 		delete db[MAC];
-		writefile(filename, db);
+		save_db();
 	}
 	exit(0)
 }
@@ -126,7 +136,7 @@ if (CONNECTED <= 60) {
 db[MAC][IFNAME][day].total_tx = total_tx + dtx;
 db[MAC][IFNAME][day].total_rx = total_rx + drx;
 
-// Dodaj statystyki godzinowe tylko jeśli był jakiś ruch danych
+// hourly stats only if there was traffic
 if (dtx > 0 || drx > 0) {
 	if (!db[MAC][IFNAME][day].hours[hour]) {
 		db[MAC][IFNAME][day].hours[hour] = {
@@ -147,5 +157,13 @@ db[MAC][IFNAME].last_rx = RX;
 db[MAC][IFNAME].last_seen = ts_now;
 db[MAC].last_seen = ts_now;
 
-writefile(filename, db);
+// prune hourly values older than 31 days (daily totals are kept)
+let cutoff_t = localtime(time() - 31 * 86400);
+let cutoff = sprintf("%04d%02d%02d", cutoff_t.year, cutoff_t.mon, cutoff_t.mday);
+for (let k in db[MAC][IFNAME]) {
+	if (match(k, /^[0-9]{8}$/) && k < cutoff && type(db[MAC][IFNAME][k]) == "object")
+		delete db[MAC][IFNAME][k].hours;
+}
+
+save_db();
 exit(0);
